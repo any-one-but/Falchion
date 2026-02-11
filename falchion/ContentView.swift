@@ -2,7 +2,6 @@
 //  ContentView.swift
 //  falchion
 //
-//  Created by Jo Walsh on 2/11/26.
 //
 
 import SwiftUI
