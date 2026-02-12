@@ -2,36 +2,26 @@ import AppKit
 import SwiftUI
 
 struct FalchionShellView: View {
+    @Environment(\.openWindow) private var openWindow
     @EnvironmentObject private var appState: FalchionAppState
 
-    private let minSidebarWidth: CGFloat = 260
-    private let maxSidebarWidth: CGFloat = 520
-
-    @State private var dragStartSidebarWidth: CGFloat?
     @State private var keyMonitor: Any?
 
     var body: some View {
         ZStack {
             Color.falchionBackground.ignoresSafeArea()
 
-            HStack(spacing: 0) {
+            HSplitView {
                 SidebarPaneView()
-                    .frame(width: appState.sidebarWidth)
-
-                divider
+                    .frame(minWidth: 260, idealWidth: 340, maxWidth: 540)
 
                 PreviewPaneView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
 
-            if appState.showMenuOverlay {
-                FalchionMenuOverlayView()
-                    .zIndex(20)
-            }
-
             if appState.showViewerOverlay {
                 FalchionViewerOverlayView()
-                    .transition(.opacity.combined(with: .scale(scale: 0.985)))
+                    .transition(.opacity)
                     .zIndex(30)
             }
 
@@ -41,9 +31,17 @@ struct FalchionShellView: View {
             }
         }
         .frame(minWidth: 1120, minHeight: 720)
-        .animation(.easeInOut(duration: 0.2), value: appState.showViewerOverlay)
+        .animation(.easeInOut(duration: 0.12), value: appState.showViewerOverlay)
         .task {
             await appState.bootstrapIfNeeded()
+        }
+        .onChange(of: appState.showMenuOverlay) { _, shouldOpen in
+            guard shouldOpen else {
+                return
+            }
+
+            openWindow(id: "falchion-options")
+            appState.showMenuOverlay = false
         }
         .onAppear {
             installKeyboardMonitor()
@@ -78,35 +76,6 @@ struct FalchionShellView: View {
         } message: {
             Text(appState.operationAlertMessage)
         }
-    }
-
-    private var divider: some View {
-        Rectangle()
-            .fill(Color.clear)
-            .frame(width: 8)
-            .overlay {
-                Rectangle()
-                    .fill(Color.falchionBorder)
-                    .frame(width: 1)
-            }
-            .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { value in
-                        if dragStartSidebarWidth == nil {
-                            dragStartSidebarWidth = appState.sidebarWidth
-                        }
-
-                        let startWidth = dragStartSidebarWidth ?? appState.sidebarWidth
-                        appState.sidebarWidth = min(
-                            max(minSidebarWidth, startWidth + value.translation.width),
-                            maxSidebarWidth
-                        )
-                    }
-                    .onEnded { _ in
-                        dragStartSidebarWidth = nil
-                    }
-            )
     }
 
     private func installKeyboardMonitor() {

@@ -107,15 +107,64 @@ enum PreviewCardSizeOption: String, CaseIterable, Identifiable {
     }
 }
 
+enum SidebarSortOption: String, CaseIterable, Identifiable {
+    case foldersFirst
+    case nameAscending
+    case nameDescending
+    case newestFirst
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .foldersFirst:
+            return "Folders First"
+        case .nameAscending:
+            return "Name A-Z"
+        case .nameDescending:
+            return "Name Z-A"
+        case .newestFirst:
+            return "Newest First"
+        }
+    }
+}
+
+enum SidebarSelectionMode {
+    case directory
+    case media
+}
+
+struct SidebarListEntry: Identifiable, Hashable {
+    enum Kind: Hashable {
+        case directory
+        case media
+    }
+
+    let kind: Kind
+    let directory: LibraryDirectory?
+    let media: MediaItem?
+
+    var id: String {
+        switch kind {
+        case .directory:
+            return "dir::\(directory?.id ?? "")"
+        case .media:
+            return "media::\(media?.id ?? "")"
+        }
+    }
+}
+
 @MainActor
 final class FalchionAppState: ObservableObject {
     @Published var sidebarWidth: CGFloat = 340
     @Published var folderSearchText: String = ""
     @Published var profileURLText: String = ""
+    @Published var sidebarSort: SidebarSortOption = .foldersFirst
 
     @Published var showMenuOverlay: Bool = false
     @Published var showViewerOverlay: Bool = false
     @Published var menuTab: FalchionMenuTab = .options
+    @Published var optionsSection: FalchionOptionsSection = .general
 
     @Published var previewDirectorySort: PreviewDirectorySortOption = .nameAscending
     @Published var previewMediaFilter: PreviewMediaFilterOption = .all
@@ -138,8 +187,10 @@ final class FalchionAppState: ObservableObject {
 
     @Published private(set) var roots: [LibraryRoot] = []
     @Published private(set) var snapshot: LibrarySnapshot = .empty
+    @Published private(set) var currentDirectoryID: String?
     @Published private(set) var selectedDirectoryID: String?
     @Published private(set) var selectedMediaID: String?
+    @Published private(set) var sidebarSelectionMode: SidebarSelectionMode = .directory
     @Published private(set) var statusMessage: String = "Choose Root to begin."
     @Published private(set) var isIndexing: Bool = false
 
@@ -216,10 +267,11 @@ final class FalchionAppState: ObservableObject {
         metadataByKey = await metadataStore.load()
 
         preferences = await preferencesStore.load()
+        normalizeLoadedPreferences()
         if let size = PreviewCardSizeOption(rawValue: preferences.previewCardSizeRaw) {
             previewCardSize = size
         }
-        FalchionThemeRuntime.apply(theme: preferences.theme, retroMode: preferences.retroMode)
+        applyThemeFromPreferences()
 
         onlineProfiles = await onlineProfilesStore.load()
         onlineProfiles.sort { $0.fetchedAt > $1.fetchedAt }
@@ -227,8 +279,10 @@ final class FalchionAppState: ObservableObject {
         roots = bookmarkStore.restorePersistedRoots()
         guard !roots.isEmpty else {
             snapshot = .empty
+            currentDirectoryID = nil
             selectedDirectoryID = nil
             selectedMediaID = nil
+            sidebarSelectionMode = .directory
             statusMessage = "Choose Root to begin."
             return
         }
@@ -249,8 +303,10 @@ final class FalchionAppState: ObservableObject {
     func refreshLibrary(reason: String = "Refreshing library...") {
         guard !roots.isEmpty else {
             snapshot = .empty
+            currentDirectoryID = nil
             selectedDirectoryID = nil
             selectedMediaID = nil
+            sidebarSelectionMode = .directory
             statusMessage = "Choose Root to begin."
             return
         }
@@ -288,12 +344,119 @@ final class FalchionAppState: ObservableObject {
     func selectDirectory(_ directoryID: String) {
         selectedDirectoryID = directoryID
         selectedMoveDestinationDirectoryID = directoryID
+        selectedMediaID = nil
+        sidebarSelectionMode = .directory
         reconcileSelectionAfterVisibilityChanges()
+        scheduleMediaPreloadForCurrentSelection()
     }
 
     func selectMedia(_ mediaID: String?) {
         selectedMediaID = mediaID
+        if mediaID == nil {
+            sidebarSelectionMode = .directory
+        } else {
+            sidebarSelectionMode = .media
+        }
         updateViewerStatusText()
+        scheduleMediaPreloadForCurrentSelection()
+    }
+
+    func selectSidebarEntry(_ entry: SidebarListEntry) {
+        switch entry.kind {
+        case .directory:
+            guard let directoryID = entry.directory?.id else {
+                return
+            }
+            selectedDirectoryID = directoryID
+            selectedMoveDestinationDirectoryID = directoryID
+            selectedMediaID = nil
+            sidebarSelectionMode = .directory
+            updateViewerStatusText()
+            scheduleMediaPreloadForCurrentSelection()
+
+        case .media:
+            guard let media = entry.media else {
+                return
+            }
+            selectedDirectoryID = media.directoryID
+            selectedMoveDestinationDirectoryID = media.directoryID
+            selectedMediaID = media.id
+            sidebarSelectionMode = .media
+            updateViewerStatusText()
+            scheduleMediaPreloadForCurrentSelection()
+        }
+    }
+
+    func enterDirectory(_ directoryID: String) {
+        currentDirectoryID = directoryID
+        selectedDirectoryID = directoryID
+        selectedMoveDestinationDirectoryID = directoryID
+        selectedMediaID = nil
+        sidebarSelectionMode = .directory
+        ensureValidSidebarSelection(preferFirstEntry: true)
+        statusMessage = "Entered \(snapshot.directoriesByID[directoryID]?.displayPath ?? "folder")."
+        scheduleMediaPreloadForCurrentSelection()
+    }
+
+    func navigateSidebarToParentDirectory() {
+        guard let currentDirectoryID,
+              let currentDirectory = snapshot.directoriesByID[currentDirectoryID],
+              let parentID = currentDirectory.parentID
+        else {
+            return
+        }
+
+        self.currentDirectoryID = parentID
+        selectedDirectoryID = currentDirectoryID
+        selectedMoveDestinationDirectoryID = currentDirectoryID
+        selectedMediaID = nil
+        sidebarSelectionMode = .directory
+        statusMessage = "Moved to \(snapshot.directoriesByID[parentID]?.displayPath ?? "parent folder")."
+        scheduleMediaPreloadForCurrentSelection()
+    }
+
+    func enterSelectedSidebarDirectory() {
+        if sidebarSelectionMode == .media {
+            openViewer(with: selectedMediaID)
+            return
+        }
+
+        guard let selectedDirectoryID else { return }
+        enterDirectory(selectedDirectoryID)
+    }
+
+    func selectNextSidebarEntry() {
+        let entries = sidebarEntries
+        guard !entries.isEmpty else {
+            return
+        }
+
+        guard let selectedID = selectedSidebarEntryID,
+              let currentIndex = entries.firstIndex(where: { $0.id == selectedID })
+        else {
+            selectSidebarEntry(entries.first!)
+            return
+        }
+
+        let nextIndex = min(currentIndex + 1, entries.count - 1)
+        selectSidebarEntry(entries[nextIndex])
+    }
+
+    func selectPreviousSidebarEntry() {
+        let entries = sidebarEntries
+        guard !entries.isEmpty else {
+            return
+        }
+
+        guard let selectedID = selectedSidebarEntryID,
+              let currentIndex = entries.firstIndex(where: { $0.id == selectedID })
+        else {
+            selectSidebarEntry(entries.last!)
+            return
+        }
+
+        let previousIndex = max(currentIndex - 1, 0)
+        selectSidebarEntry(entries[previousIndex])
     }
 
     func openViewer(with mediaID: String?) {
@@ -313,6 +476,7 @@ final class FalchionAppState: ObservableObject {
         withAnimation(.easeInOut(duration: 0.2)) {
             showViewerOverlay = true
         }
+        scheduleMediaPreloadForCurrentSelection()
     }
 
     func closeViewer() {
@@ -338,15 +502,21 @@ final class FalchionAppState: ObservableObject {
         case .closeOverlay:
             if showViewerOverlay {
                 closeViewer()
-            } else if showMenuOverlay {
-                showMenuOverlay = false
             }
         case .nextDirectory:
             navigateToNextDirectory()
         case .previousDirectory:
             navigateToPreviousDirectory()
+        case .enterDirectory:
+            enterSelectedSidebarDirectory()
+        case .exitDirectory:
+            if showViewerOverlay {
+                closeViewer()
+            } else {
+                navigateSidebarToParentDirectory()
+            }
         case .toggleMenu:
-            showMenuOverlay.toggle()
+            showMenuOverlay = true
         case .refresh:
             refreshLibrary()
         }
@@ -363,6 +533,7 @@ final class FalchionAppState: ObservableObject {
 
         if currentFiles.isEmpty {
             if let nextDirectory = nextDirectoryWithVisibleMedia(after: currentDirectoryID) {
+                self.currentDirectoryID = nextDirectory
                 selectedDirectoryID = nextDirectory
                 selectMedia(visibleFiles(in: nextDirectory).first?.id)
             }
@@ -377,6 +548,7 @@ final class FalchionAppState: ObservableObject {
         }
 
         if let nextDirectory = nextDirectoryWithVisibleMedia(after: currentDirectoryID) {
+            self.currentDirectoryID = nextDirectory
             selectedDirectoryID = nextDirectory
             selectMedia(visibleFiles(in: nextDirectory).first?.id)
         } else {
@@ -393,6 +565,7 @@ final class FalchionAppState: ObservableObject {
 
         if currentFiles.isEmpty {
             if let previousDirectory = previousDirectoryWithVisibleMedia(before: currentDirectoryID) {
+                self.currentDirectoryID = previousDirectory
                 selectedDirectoryID = previousDirectory
                 selectMedia(visibleFiles(in: previousDirectory).last?.id)
             }
@@ -407,6 +580,7 @@ final class FalchionAppState: ObservableObject {
         }
 
         if let previousDirectory = previousDirectoryWithVisibleMedia(before: currentDirectoryID) {
+            self.currentDirectoryID = previousDirectory
             selectedDirectoryID = previousDirectory
             selectMedia(visibleFiles(in: previousDirectory).last?.id)
         } else {
@@ -415,35 +589,11 @@ final class FalchionAppState: ObservableObject {
     }
 
     func navigateToNextDirectory() {
-        guard let currentDirectoryID = selectedDirectoryID else {
-            return
-        }
-
-        let directoryIDs = filteredDirectories.map(\.id)
-        guard let currentIndex = directoryIDs.firstIndex(of: currentDirectoryID), currentIndex < directoryIDs.count - 1 else {
-            return
-        }
-
-        let nextID = directoryIDs[currentIndex + 1]
-        selectedDirectoryID = nextID
-        selectedMoveDestinationDirectoryID = nextID
-        reconcileSelectionAfterVisibilityChanges()
+        selectNextSidebarEntry()
     }
 
     func navigateToPreviousDirectory() {
-        guard let currentDirectoryID = selectedDirectoryID else {
-            return
-        }
-
-        let directoryIDs = filteredDirectories.map(\.id)
-        guard let currentIndex = directoryIDs.firstIndex(of: currentDirectoryID), currentIndex > 0 else {
-            return
-        }
-
-        let previousID = directoryIDs[currentIndex - 1]
-        selectedDirectoryID = previousID
-        selectedMoveDestinationDirectoryID = previousID
-        reconcileSelectionAfterVisibilityChanges()
+        selectPreviousSidebarEntry()
     }
 
     func requestDeleteSelectedMedia() {
@@ -758,60 +908,207 @@ final class FalchionAppState: ObservableObject {
     }
 
     func setTheme(_ theme: FalchionThemeOption) {
-        preferences.theme = theme
+        updatePreferences {
+            $0.theme = theme
+        }
         applyThemeFromPreferences()
-        optionsStatusText = "Saved"
-        persistPreferences()
     }
 
-    func setRetroMode(_ enabled: Bool) {
-        preferences.retroMode = enabled
-        applyThemeFromPreferences()
-        optionsStatusText = "Saved"
-        persistPreferences()
+    func setStartAtLastRoot(_ value: Bool) {
+        updatePreferences {
+            $0.startAtLastRoot = value
+        }
+    }
+
+    func setReopenLastSelection(_ value: Bool) {
+        updatePreferences {
+            $0.reopenLastSelection = value
+        }
+    }
+
+    func setAutoRefreshOnLaunch(_ value: Bool) {
+        updatePreferences {
+            $0.autoRefreshOnLaunch = value
+        }
+    }
+
+    func setConfirmDeleteActions(_ value: Bool) {
+        updatePreferences {
+            $0.confirmDeleteActions = value
+        }
+    }
+
+    func setCompactSidebarRows(_ value: Bool) {
+        updatePreferences {
+            $0.compactSidebarRows = value
+        }
+    }
+
+    func setShowPathsInSidebar(_ value: Bool) {
+        updatePreferences {
+            $0.showPathsInSidebar = value
+        }
+    }
+
+    func setShowMetadataBadges(_ value: Bool) {
+        updatePreferences {
+            $0.showMetadataBadges = value
+        }
+    }
+
+    func setAutoplayVideosInPreview(_ value: Bool) {
+        updatePreferences {
+            $0.autoplayVideosInPreview = value
+            if value {
+                $0.videoPreview = $0.muteVideosByDefault ? "muted" : "unmuted"
+            } else {
+                $0.videoPreview = "off"
+            }
+        }
+    }
+
+    func setMuteVideosByDefault(_ value: Bool) {
+        updatePreferences {
+            $0.muteVideosByDefault = value
+            if $0.autoplayVideosInPreview {
+                $0.videoPreview = value ? "muted" : "unmuted"
+            } else {
+                $0.videoPreview = "off"
+            }
+        }
+    }
+
+    func setLoopVideosByDefault(_ value: Bool) {
+        updatePreferences {
+            $0.loopVideosByDefault = value
+            $0.videoEndBehavior = value ? "loop" : "stop"
+        }
+    }
+
+    func setPreloadNeighborMedia(_ value: Bool) {
+        updatePreferences {
+            $0.preloadNeighborMedia = value
+            $0.preloadNextMode = value ? "on" : "off"
+        }
+        scheduleMediaPreloadForCurrentSelection()
+    }
+
+    func setPlaybackStepSeconds(_ value: Int) {
+        updatePreferences {
+            $0.playbackStepSeconds = min(max(value, 1), 30)
+            $0.videoSkipStep = String($0.playbackStepSeconds)
+        }
     }
 
     func setThumbnailFitMode(_ mode: ThumbnailFitMode) {
-        preferences.thumbnailFitMode = mode
-        optionsStatusText = "Saved"
-        persistPreferences()
+        updatePreferences {
+            $0.thumbnailFitMode = mode
+            $0.previewThumbFit = mode.rawValue
+        }
+        scheduleMediaPreloadForCurrentSelection()
     }
 
     func setPreviewCardSizePreference(_ size: PreviewCardSizeOption) {
         previewCardSize = size
-        preferences.previewCardSizeRaw = size.rawValue
-        optionsStatusText = "Saved"
-        persistPreferences()
+        updatePreferences {
+            $0.previewCardSizeRaw = size.rawValue
+            $0.mediaThumbUiSize = size.rawValue
+        }
+        scheduleMediaPreloadForCurrentSelection()
+    }
+
+    func setThumbnailPreloadCount(_ value: Int) {
+        updatePreferences {
+            $0.thumbnailPreloadCount = min(max(value, 4), 80)
+        }
+        scheduleMediaPreloadForCurrentSelection()
+    }
+
+    func setSmoothImageTransitions(_ value: Bool) {
+        updatePreferences {
+            $0.smoothImageTransitions = value
+        }
+    }
+
+    func setShowFileExtensions(_ value: Bool) {
+        updatePreferences {
+            $0.showFileExtensions = value
+            $0.hideFileExtensions = !value
+        }
+    }
+
+    func setNormalizeRenamedFilenames(_ value: Bool) {
+        updatePreferences {
+            $0.normalizeRenamedFilenames = value
+        }
+    }
+
+    func setPreserveFilenameCase(_ value: Bool) {
+        updatePreferences {
+            $0.preserveFilenameCase = value
+        }
+    }
+
+    func setDefaultRenameTemplate(_ value: String) {
+        updatePreferences {
+            $0.defaultRenameTemplate = value
+        }
     }
 
     func setConflictPolicy(_ policy: FileConflictPolicy) {
-        preferences.defaultConflictPolicy = policy
-        optionsStatusText = "Saved"
-        persistPreferences()
+        updatePreferences {
+            $0.defaultConflictPolicy = policy
+        }
     }
 
     func setOptionDescriptionsVisible(_ visible: Bool) {
-        preferences.showOptionDescriptions = visible
-        optionsStatusText = "Saved"
-        persistPreferences()
+        updatePreferences {
+            $0.showOptionDescriptions = visible
+            $0.hideOptionDescriptions = !visible
+        }
     }
 
     func setKeybindDescriptionsVisible(_ visible: Bool) {
-        preferences.showKeybindDescriptions = visible
-        keybindStatusText = "Saved"
-        persistPreferences()
+        updatePreferences {
+            $0.showKeybindDescriptions = visible
+            $0.hideKeybindDescriptions = !visible
+        }
     }
 
     func setOnlineLoadMode(_ mode: OnlineLoadMode) {
-        preferences.onlineLoadMode = mode
-        optionsStatusText = "Saved"
-        persistPreferences()
+        updatePreferences {
+            $0.onlineLoadMode = mode
+        }
     }
 
     func setListOnlineFoldersFirst(_ enabled: Bool) {
-        preferences.listOnlineFoldersFirst = enabled
-        optionsStatusText = "Saved"
-        persistPreferences()
+        updatePreferences {
+            $0.listOnlineFoldersFirst = enabled
+        }
+    }
+
+    func setLegacyStringOption(_ keyPath: WritableKeyPath<AppPreferences, String>, _ value: String) {
+        updatePreferences {
+            $0[keyPath: keyPath] = value
+            syncModernPreferencesFromLegacy(&$0)
+        }
+        applyLegacyPreferenceSideEffects()
+    }
+
+    func setLegacyBoolOption(_ keyPath: WritableKeyPath<AppPreferences, Bool>, _ value: Bool) {
+        updatePreferences {
+            $0[keyPath: keyPath] = value
+            syncModernPreferencesFromLegacy(&$0)
+        }
+        applyLegacyPreferenceSideEffects()
+    }
+
+    func setLegacyDoubleOption(_ keyPath: WritableKeyPath<AppPreferences, Double>, _ value: Double) {
+        updatePreferences {
+            $0[keyPath: keyPath] = value
+            syncModernPreferencesFromLegacy(&$0)
+        }
+        applyLegacyPreferenceSideEffects()
     }
 
     func updateKeyBinding(action: KeybindAction, token: KeyToken?) {
@@ -902,7 +1199,18 @@ final class FalchionAppState: ObservableObject {
     }
 
     var titleText: String {
-        selectedDirectory?.name ?? "Falchion"
+        currentDirectory?.name ?? "Falchion"
+    }
+
+    var preferredColorScheme: ColorScheme? {
+        switch preferences.theme {
+        case .system:
+            return nil
+        case .light:
+            return .light
+        case .dark:
+            return .dark
+        }
     }
 
     var selectedDirectory: LibraryDirectory? {
@@ -913,12 +1221,26 @@ final class FalchionAppState: ObservableObject {
         return snapshot.directoriesByID[selectedDirectoryID]
     }
 
+    var currentDirectory: LibraryDirectory? {
+        guard let currentDirectoryID else {
+            return nil
+        }
+
+        return snapshot.directoriesByID[currentDirectoryID]
+    }
+
     var selectedMediaItem: MediaItem? {
         guard let selectedMediaID else {
             return nil
         }
 
-        return previewFilesForDisplay.first { $0.id == selectedMediaID }
+        for files in snapshot.filesByDirectoryID.values {
+            if let match = files.first(where: { $0.id == selectedMediaID }) {
+                return match
+            }
+        }
+
+        return nil
     }
 
     var totalDirectoryCount: Int {
@@ -932,13 +1254,21 @@ final class FalchionAppState: ObservableObject {
     }
 
     var directoryPaneSummary: String {
-        "\(filteredDirectories.count)/\(totalDirectoryCount) dirs - \(visibleMediaCount) visible - \(roots.count) roots"
+        let itemCount = sidebarEntries.count
+        if let currentDirectory {
+            return "\(itemCount) items in \(currentDirectory.name)"
+        }
+        return "Choose Root to begin."
     }
 
     var visibleMediaCount: Int {
         snapshot.filesByDirectoryID.values.flatMap { files in
             files.filter(shouldShowMedia)
         }.count
+    }
+
+    var isPreviewingMediaSelection: Bool {
+        sidebarSelectionMode == .media && selectedMediaItem != nil
     }
 
     var thumbnailFitMode: ThumbnailFitMode {
@@ -958,8 +1288,7 @@ final class FalchionAppState: ObservableObject {
 
     var configurationSummaryJSON: String {
         struct ConfigSummary: Codable {
-            var theme: String
-            var retroMode: Bool
+            var appearance: String
             var thumbnailFitMode: String
             var defaultConflictPolicy: String
             var onlineLoadMode: String
@@ -975,8 +1304,7 @@ final class FalchionAppState: ObservableObject {
         }
 
         let summary = ConfigSummary(
-            theme: preferences.theme.rawValue,
-            retroMode: preferences.retroMode,
+            appearance: preferences.theme.rawValue,
             thumbnailFitMode: preferences.thumbnailFitMode.rawValue,
             defaultConflictPolicy: preferences.defaultConflictPolicy.rawValue,
             onlineLoadMode: preferences.onlineLoadMode.rawValue,
@@ -1004,21 +1332,80 @@ final class FalchionAppState: ObservableObject {
         return "\(directory.recursiveFileCount) - *\(favoriteCount) - H\(hiddenCount)"
     }
 
-    var filteredDirectories: [LibraryDirectory] {
-        let query = folderSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let directories = snapshot.allDirectories
+    func mediaListMetadataText(_ item: MediaItem) -> String {
+        var chunks: [String] = [item.kind == .video ? "Video" : "Image"]
 
-        let filtered: [LibraryDirectory]
-        if query.isEmpty {
-            filtered = directories
-        } else {
-            filtered = directories.filter { directory in
-                directory.displayPath.localizedCaseInsensitiveContains(query)
-                    || directory.name.localizedCaseInsensitiveContains(query)
-            }
+        if let sizeBytes = item.sizeBytes {
+            let formatter = ByteCountFormatter()
+            formatter.allowedUnits = [.useKB, .useMB, .useGB]
+            formatter.countStyle = .file
+            formatter.includesUnit = true
+            chunks.append(formatter.string(fromByteCount: sizeBytes))
         }
 
-        return filtered.sorted { lhs, rhs in
+        let itemMetadata = metadata(for: item)
+        if itemMetadata.isFavorite {
+            chunks.append("Favorite")
+        }
+        if itemMetadata.isHidden {
+            chunks.append("Hidden")
+        }
+
+        return chunks.joined(separator: " • ")
+    }
+
+    var selectedSidebarEntryID: String? {
+        switch sidebarSelectionMode {
+        case .directory:
+            guard let selectedDirectoryID else {
+                return nil
+            }
+            return "dir::\(selectedDirectoryID)"
+        case .media:
+            guard let selectedMediaID else {
+                return nil
+            }
+            return "media::\(selectedMediaID)"
+        }
+    }
+
+    func isSidebarEntrySelected(_ entry: SidebarListEntry) -> Bool {
+        selectedSidebarEntryID == entry.id
+    }
+
+    var sidebarEntries: [SidebarListEntry] {
+        guard let currentDirectoryID else {
+            return []
+        }
+
+        let query = folderSearchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let childDirectories = (snapshot.childDirectoryIDsByParentID[currentDirectoryID] ?? [])
+            .compactMap { snapshot.directoriesByID[$0] }
+            .filter { directory in
+                query.isEmpty
+                    || directory.name.lowercased().contains(query)
+                    || directory.displayPath.lowercased().contains(query)
+            }
+
+        let media = visibleFiles(in: currentDirectoryID).filter { item in
+            query.isEmpty
+                || item.name.lowercased().contains(query)
+                || item.relativePath.lowercased().contains(query)
+        }
+
+        var entries: [SidebarListEntry] = []
+        entries.append(contentsOf: childDirectories.map { SidebarListEntry(kind: .directory, directory: $0, media: nil) })
+        entries.append(contentsOf: media.map { SidebarListEntry(kind: .media, directory: nil, media: $0) })
+
+        return entries.sorted { lhs, rhs in
+            sortSidebarEntry(lhs, rhs)
+        }
+    }
+
+    var filteredDirectories: [LibraryDirectory] {
+        let directories = snapshot.allDirectories
+
+        return directories.sorted { lhs, rhs in
             let leftIsOnline = isOnlineDirectory(lhs)
             let rightIsOnline = isOnlineDirectory(rhs)
             if preferences.listOnlineFoldersFirst, leftIsOnline != rightIsOnline {
@@ -1038,11 +1425,11 @@ final class FalchionAppState: ObservableObject {
     }
 
     var previewDirectoriesForDisplay: [LibraryDirectory] {
-        guard let selectedDirectoryID else {
+        guard let previewTargetDirectoryID else {
             return []
         }
 
-        let childIDs = snapshot.childDirectoryIDsByParentID[selectedDirectoryID] ?? []
+        let childIDs = snapshot.childDirectoryIDsByParentID[previewTargetDirectoryID] ?? []
         let directories = childIDs.compactMap { snapshot.directoriesByID[$0] }
 
         return directories.sorted { lhs, rhs in
@@ -1059,11 +1446,11 @@ final class FalchionAppState: ObservableObject {
     }
 
     var previewFilesForDisplay: [MediaItem] {
-        guard let selectedDirectoryID else {
+        guard let previewTargetDirectoryID else {
             return []
         }
 
-        return visibleFiles(in: selectedDirectoryID)
+        return visibleFiles(in: previewTargetDirectoryID)
     }
 
     var viewerPositionLabel: String {
@@ -1078,31 +1465,27 @@ final class FalchionAppState: ObservableObject {
         return "\(index + 1) / \(files.count)"
     }
 
+    private var previewTargetDirectoryID: String? {
+        switch sidebarSelectionMode {
+        case .directory:
+            return selectedDirectoryID
+        case .media:
+            return selectedDirectoryID ?? currentDirectoryID
+        }
+    }
+
     func reconcileSelectionAfterVisibilityChanges() {
-        guard let selectedDirectoryID else {
+        guard currentDirectoryID != nil else {
+            selectedDirectoryID = nil
             selectedMediaID = nil
+            sidebarSelectionMode = .directory
             updateViewerStatusText()
             return
         }
 
-        let files = visibleFiles(in: selectedDirectoryID)
-
-        if files.isEmpty {
-            selectedMediaID = nil
-            if showViewerOverlay {
-                closeViewer()
-            }
-            updateViewerStatusText()
-            return
-        }
-
-        if let selectedMediaID, files.contains(where: { $0.id == selectedMediaID }) {
-            updateViewerStatusText()
-            return
-        }
-
-        selectedMediaID = files.first?.id
+        ensureValidSidebarSelection(preferFirstEntry: false)
         updateViewerStatusText()
+        scheduleMediaPreloadForCurrentSelection()
     }
 
     private func visibleFiles(in directoryID: String) -> [MediaItem] {
@@ -1148,6 +1531,41 @@ final class FalchionAppState: ObservableObject {
         }
     }
 
+    private func scheduleMediaPreloadForCurrentSelection() {
+        let files = previewFilesForDisplay
+        guard !files.isEmpty else {
+            return
+        }
+
+        let preloadBudget = min(max(preferences.thumbnailPreloadCount, 1), files.count)
+
+        let focusIndex: Int
+        if let selectedMediaID,
+           let selectedIndex = files.firstIndex(where: { $0.id == selectedMediaID }) {
+            focusIndex = selectedIndex
+        } else {
+            focusIndex = 0
+        }
+
+        let selectedSlice: [MediaItem]
+        if preferences.preloadNeighborMedia {
+            let half = max(preloadBudget / 2, 1)
+            let lowerBound = max(0, focusIndex - half)
+            let upperBound = min(files.count - 1, lowerBound + preloadBudget - 1)
+            selectedSlice = Array(files[lowerBound...upperBound])
+        } else {
+            selectedSlice = [files[focusIndex]]
+        }
+
+        let pixelSize = max(previewCardSize.thumbnailHeight * 2.4, 260)
+        let imageURLs = selectedSlice.filter { $0.kind == .image }.map(\.url)
+
+        Task(priority: .utility) {
+            await ThumbnailService.shared.preload(items: selectedSlice, maxPixelSize: pixelSize, scale: 2)
+            await MediaImageService.shared.preload(imageURLs)
+        }
+    }
+
     private func shouldShowMedia(_ item: MediaItem) -> Bool {
         let metadata = metadata(for: item)
 
@@ -1163,6 +1581,94 @@ final class FalchionAppState: ObservableObject {
         case .videos:
             return item.kind == .video
         }
+    }
+
+    private func sortSidebarEntry(_ lhs: SidebarListEntry, _ rhs: SidebarListEntry) -> Bool {
+        func name(_ entry: SidebarListEntry) -> String {
+            if let directory = entry.directory {
+                return directory.name
+            }
+            return entry.media?.name ?? ""
+        }
+
+        func date(_ entry: SidebarListEntry) -> Date {
+            if let modifiedAt = entry.media?.modifiedAt {
+                return modifiedAt
+            }
+            return .distantPast
+        }
+
+        switch sidebarSort {
+        case .foldersFirst:
+            if lhs.kind != rhs.kind {
+                return lhs.kind == .directory
+            }
+            return name(lhs).localizedCaseInsensitiveCompare(name(rhs)) == .orderedAscending
+
+        case .nameAscending:
+            if lhs.kind != rhs.kind {
+                return lhs.kind == .directory
+            }
+            return name(lhs).localizedCaseInsensitiveCompare(name(rhs)) == .orderedAscending
+
+        case .nameDescending:
+            if lhs.kind != rhs.kind {
+                return lhs.kind == .directory
+            }
+            return name(lhs).localizedCaseInsensitiveCompare(name(rhs)) == .orderedDescending
+
+        case .newestFirst:
+            if lhs.kind != rhs.kind {
+                return lhs.kind == .directory
+            }
+            if lhs.kind == .media && rhs.kind == .media {
+                let leftDate = date(lhs)
+                let rightDate = date(rhs)
+                if leftDate != rightDate {
+                    return leftDate > rightDate
+                }
+            }
+            return name(lhs).localizedCaseInsensitiveCompare(name(rhs)) == .orderedAscending
+        }
+    }
+
+    private func ensureValidSidebarSelection(preferFirstEntry: Bool) {
+        let entries = sidebarEntries
+        guard !entries.isEmpty else {
+            selectedMediaID = nil
+            sidebarSelectionMode = .directory
+            if selectedDirectoryID == nil {
+                selectedDirectoryID = currentDirectoryID
+                selectedMoveDestinationDirectoryID = currentDirectoryID
+            }
+            return
+        }
+
+        if preferFirstEntry {
+            selectSidebarEntry(entries[0])
+            return
+        }
+
+        if let selectedSidebarEntryID,
+           entries.contains(where: { $0.id == selectedSidebarEntryID }) {
+            return
+        }
+
+        if sidebarSelectionMode == .directory,
+           let selectedDirectoryID,
+           let matchingDirectory = entries.first(where: { $0.directory?.id == selectedDirectoryID }) {
+            selectSidebarEntry(matchingDirectory)
+            return
+        }
+
+        if sidebarSelectionMode == .media,
+           let selectedMediaID,
+           let matchingMedia = entries.first(where: { $0.media?.id == selectedMediaID }) {
+            selectSidebarEntry(matchingMedia)
+            return
+        }
+
+        selectSidebarEntry(entries[0])
     }
 
     private func nextDirectoryWithVisibleMedia(after directoryID: String) -> String? {
@@ -1235,6 +1741,67 @@ final class FalchionAppState: ObservableObject {
             .replacingOccurrences(of: "|", with: "")
     }
 
+    private func updatePreferences(_ mutate: (inout AppPreferences) -> Void) {
+        mutate(&preferences)
+        optionsStatusText = "Saved"
+        persistPreferences()
+    }
+
+    private func normalizeLoadedPreferences() {
+        syncModernPreferencesFromLegacy(&preferences)
+
+        for binding in AppPreferences.default.keyBindings {
+            if preferences.keyBindings.contains(where: { $0.action == binding.action }) {
+                continue
+            }
+            preferences.keyBindings.append(binding)
+        }
+
+        if preferences.token(for: .previousDirectory) == .leftBracket {
+            preferences.setBinding(KeyToken(rawValue: "w"), for: .previousDirectory)
+        }
+
+        if preferences.token(for: .nextDirectory) == .rightBracket {
+            preferences.setBinding(KeyToken(rawValue: "s"), for: .nextDirectory)
+        }
+
+        if preferences.playbackStepSeconds < 1 {
+            preferences.playbackStepSeconds = AppPreferences.default.playbackStepSeconds
+        }
+
+        if preferences.thumbnailPreloadCount < 1 {
+            preferences.thumbnailPreloadCount = AppPreferences.default.thumbnailPreloadCount
+        }
+    }
+
+    private func syncModernPreferencesFromLegacy(_ preferences: inout AppPreferences) {
+        preferences.showOptionDescriptions = !preferences.hideOptionDescriptions
+        preferences.showKeybindDescriptions = !preferences.hideKeybindDescriptions
+        preferences.showFileExtensions = !preferences.hideFileExtensions
+        preferences.thumbnailFitMode = preferences.previewThumbFit == "contain" ? .contain : .cover
+        preferences.previewCardSizeRaw = preferences.mediaThumbUiSize
+        preferences.playbackStepSeconds = Int(preferences.videoSkipStep) ?? preferences.playbackStepSeconds
+        preferences.preloadNeighborMedia = preferences.preloadNextMode != "off"
+        preferences.autoplayVideosInPreview = preferences.videoPreview != "off"
+        preferences.muteVideosByDefault = preferences.videoPreview == "muted"
+        preferences.loopVideosByDefault = preferences.videoEndBehavior == "loop"
+    }
+
+    private func applyLegacyPreferenceSideEffects() {
+        if let size = PreviewCardSizeOption(rawValue: preferences.previewCardSizeRaw) {
+            previewCardSize = size
+        } else {
+            previewCardSize = .small
+        }
+
+        if !preferences.onlineFeaturesEnabled, menuTab == .online {
+            menuTab = .options
+        }
+
+        scheduleMediaPreloadForCurrentSelection()
+        renderOnlineTabIfVisible()
+    }
+
     private func updateViewerStatusText() {
         guard let selectedMediaItem else {
             viewerStatusText = "No media selected"
@@ -1257,12 +1824,31 @@ final class FalchionAppState: ObservableObject {
     }
 
     private func syncSelectionAfterRefresh() {
-        if let selectedDirectoryID, snapshot.directoriesByID[selectedDirectoryID] != nil {
-            return
+        if let currentDirectoryID, snapshot.directoriesByID[currentDirectoryID] == nil {
+            self.currentDirectoryID = nil
         }
 
-        selectedDirectoryID = snapshot.rootDirectoryIDs.first
-        selectedMoveDestinationDirectoryID = selectedDirectoryID
+        if currentDirectoryID == nil {
+            currentDirectoryID = snapshot.rootDirectoryIDs.first
+        }
+
+        if let selectedDirectoryID, snapshot.directoriesByID[selectedDirectoryID] == nil {
+            self.selectedDirectoryID = nil
+        }
+
+        if selectedDirectoryID == nil {
+            selectedDirectoryID = currentDirectoryID
+            selectedMoveDestinationDirectoryID = currentDirectoryID
+            sidebarSelectionMode = .directory
+            selectedMediaID = nil
+        }
+
+        if selectedMediaID != nil, selectedMediaItem == nil {
+            self.selectedMediaID = nil
+            sidebarSelectionMode = .directory
+        }
+
+        ensureValidSidebarSelection(preferFirstEntry: false)
     }
 
     private func restorePendingSelectionAfterRefresh() {
@@ -1270,8 +1856,10 @@ final class FalchionAppState: ObservableObject {
             let normalized = URL(fileURLWithPath: pendingSelectedMediaPath).standardizedFileURL.path
             for (directoryID, files) in snapshot.filesByDirectoryID {
                 if let media = files.first(where: { $0.url.standardizedFileURL.path == normalized }) {
+                    currentDirectoryID = directoryID
                     selectedDirectoryID = directoryID
                     selectedMediaID = media.id
+                    sidebarSelectionMode = .media
                     selectedMoveDestinationDirectoryID = directoryID
                     self.pendingSelectedMediaPath = nil
                     self.pendingSelectedDirectoryPath = nil
@@ -1289,7 +1877,10 @@ final class FalchionAppState: ObservableObject {
                 }
 
                 if directoryURL.standardizedFileURL.path == normalized {
+                    currentDirectoryID = directory.id
                     selectedDirectoryID = directory.id
+                    selectedMediaID = nil
+                    sidebarSelectionMode = .directory
                     selectedMoveDestinationDirectoryID = directory.id
                     break
                 }
@@ -1390,7 +1981,7 @@ final class FalchionAppState: ObservableObject {
     }
 
     private func applyThemeFromPreferences() {
-        FalchionThemeRuntime.apply(theme: preferences.theme, retroMode: preferences.retroMode)
+        FalchionThemeRuntime.apply(theme: preferences.theme)
     }
 
     private func presentOperationError(_ message: String) {
@@ -1430,6 +2021,31 @@ enum FalchionMenuTab: String, CaseIterable, Identifiable {
             return "Responses"
         case .keybinds:
             return "Keybinds"
+        }
+    }
+}
+
+enum FalchionOptionsSection: String, CaseIterable, Identifiable {
+    case general
+    case appearance
+    case playback
+    case preview
+    case filenames
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .general:
+            return "General"
+        case .appearance:
+            return "Appearance"
+        case .playback:
+            return "Playback"
+        case .preview:
+            return "Preview"
+        case .filenames:
+            return "Filenames"
         }
     }
 }

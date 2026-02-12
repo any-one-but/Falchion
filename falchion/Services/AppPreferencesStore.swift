@@ -13,26 +13,30 @@ actor AppPreferencesStore {
             .appendingPathComponent("app-preferences.json", isDirectory: false)
     }
 
-    func load() -> AppPreferences {
+    func load() async -> AppPreferences {
         guard fileManager.fileExists(atPath: fileURL.path) else {
             return .default
         }
 
         do {
             let data = try Data(contentsOf: fileURL)
-            return try JSONDecoder().decode(AppPreferences.self, from: data)
+            return try await MainActor.run {
+                try JSONDecoder().decode(AppPreferences.self, from: data)
+            }
         } catch {
             return .default
         }
     }
 
-    func save(_ preferences: AppPreferences) {
+    func save(_ preferences: AppPreferences) async {
         let destination = fileURL
         let directory = destination.deletingLastPathComponent()
 
         do {
             try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-            let data = try JSONEncoder().encode(preferences)
+            let data = try await MainActor.run {
+                try JSONEncoder().encode(preferences)
+            }
             try data.write(to: destination, options: [.atomic])
         } catch {
             return

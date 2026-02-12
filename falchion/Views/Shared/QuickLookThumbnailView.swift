@@ -44,6 +44,12 @@ struct QuickLookThumbnailView: View {
         loadTask?.cancel()
         loadTask = Task {
             let maxPixel = max(height * 2.2, 240)
+            if let cached = await ThumbnailService.shared.cachedThumbnail(for: item, maxPixelSize: maxPixel, scale: max(displayScale, 1)) {
+                await MainActor.run {
+                    self.image = cached
+                }
+            }
+
             let generated = await ThumbnailService.shared.thumbnail(for: item, maxPixelSize: maxPixel, scale: max(displayScale, 1))
             guard !Task.isCancelled else {
                 return

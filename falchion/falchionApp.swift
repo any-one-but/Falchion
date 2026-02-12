@@ -15,6 +15,14 @@ struct falchionApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(appState)
+                .preferredColorScheme(appState.preferredColorScheme)
         }
+
+        Window("Falchion Options", id: "falchion-options") {
+            FalchionOptionsWindowView()
+                .environmentObject(appState)
+                .preferredColorScheme(appState.preferredColorScheme)
+        }
+        .defaultSize(width: 920, height: 620)
     }
 }

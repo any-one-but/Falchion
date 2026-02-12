@@ -9,8 +9,7 @@ actor ThumbnailService {
     private var inFlight: [String: Task<NSImage?, Never>] = [:]
 
     func thumbnail(for item: MediaItem, maxPixelSize: CGFloat, scale: CGFloat) async -> NSImage? {
-        let sizeKey = Int((maxPixelSize * scale).rounded())
-        let cacheKey = "\(item.id)::\(sizeKey)"
+        let cacheKey = Self.cacheKey(for: item, maxPixelSize: maxPixelSize, scale: scale)
 
         if let cached = cache[cacheKey] {
             return cached
@@ -34,6 +33,24 @@ actor ThumbnailService {
         }
 
         return generated
+    }
+
+    func cachedThumbnail(for item: MediaItem, maxPixelSize: CGFloat, scale: CGFloat) -> NSImage? {
+        let cacheKey = Self.cacheKey(for: item, maxPixelSize: maxPixelSize, scale: scale)
+        return cache[cacheKey]
+    }
+
+    func preload(items: [MediaItem], maxPixelSize: CGFloat, scale: CGFloat) {
+        for item in items {
+            Task {
+                _ = await thumbnail(for: item, maxPixelSize: maxPixelSize, scale: scale)
+            }
+        }
+    }
+
+    private static func cacheKey(for item: MediaItem, maxPixelSize: CGFloat, scale: CGFloat) -> String {
+        let sizeKey = Int((maxPixelSize * scale).rounded())
+        return "\(item.id)::\(sizeKey)"
     }
 
     private func generateThumbnail(for url: URL, maxPixelSize: CGFloat, scale: CGFloat) async -> NSImage? {

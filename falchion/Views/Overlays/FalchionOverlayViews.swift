@@ -156,10 +156,10 @@ struct FalchionMenuOverlayView: View {
                     .foregroundStyle(Color.falchionTextPrimary)
 
                 optionRow(
-                    title: "Theme",
-                    hint: "Switches app palette and shell styling."
+                    title: "Appearance",
+                    hint: "Choose System to follow macOS or force Light/Dark."
                 ) {
-                    Picker("Theme", selection: Binding(
+                    Picker("Appearance", selection: Binding(
                         get: { appState.preferences.theme },
                         set: { appState.setTheme($0) }
                     )) {
@@ -168,18 +168,7 @@ struct FalchionMenuOverlayView: View {
                         }
                     }
                     .labelsHidden()
-                    .frame(width: 230)
-                }
-
-                optionRow(
-                    title: "Retro Mode",
-                    hint: "Forces a low-fidelity UI style similar to the Electron retro modes."
-                ) {
-                    Toggle("", isOn: Binding(
-                        get: { appState.preferences.retroMode },
-                        set: { appState.setRetroMode($0) }
-                    ))
-                    .labelsHidden()
+                    .frame(width: 180)
                 }
 
                 optionRow(
@@ -600,94 +589,11 @@ struct FalchionViewerOverlayView: View {
 
             if let media = appState.selectedMediaItem {
                 ViewerMediaSurfaceView(item: media)
-                    .id(media.id)
-                    .padding(16)
-            } else {
-                Text("No media selected")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.8))
+                    .padding(0)
             }
-
-            controls
         }
         .onTapGesture(count: 2) {
             appState.closeViewer()
-        }
-    }
-
-    private var controls: some View {
-        ZStack {
-            VStack {
-                HStack {
-                    Button("X") {
-                        appState.closeViewer()
-                    }
-                    .buttonStyle(FalchionMiniButtonStyle())
-
-                    Spacer()
-
-                    Text(appState.viewerStatusText)
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.92))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                        .background(.black.opacity(0.55))
-                        .cornerRadius(3)
-
-                    Spacer()
-
-                    Text(appState.selectedDirectory?.displayPath ?? "No folder")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.82))
-                        .lineLimit(1)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                        .background(.black.opacity(0.55))
-                        .cornerRadius(3)
-                }
-                .padding(.horizontal, 16)
-                .padding(.top, 16)
-
-                Spacer()
-
-                Text(appState.selectedMediaItem?.name ?? "No media selected")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.9))
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 4)
-                    .background(.black.opacity(0.55))
-                    .cornerRadius(2)
-                    .padding(.bottom, 16)
-            }
-
-            HStack {
-                Button {
-                    appState.navigateToPreviousMedia()
-                } label: {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 18, weight: .bold))
-                        .frame(width: 34, height: 54)
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.white.opacity(0.9))
-                .background(.black.opacity(0.35))
-                .cornerRadius(4)
-
-                Spacer()
-
-                Button {
-                    appState.navigateToNextMedia()
-                } label: {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 18, weight: .bold))
-                        .frame(width: 34, height: 54)
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.white.opacity(0.9))
-                .background(.black.opacity(0.35))
-                .cornerRadius(4)
-            }
-            .padding(.horizontal, 16)
         }
     }
 }
@@ -698,64 +604,13 @@ private struct ViewerMediaSurfaceView: View {
     var body: some View {
         Group {
             if item.kind == .video {
-                VideoPlaybackView(url: item.url, layout: .expanded)
+                PlainVideoSurfaceView(url: item.url)
             } else {
-                ViewerImageSurfaceView(url: item.url)
+                PreloadedImageView(url: item.url)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .transition(.opacity.combined(with: .scale(scale: 0.985)))
-    }
-}
-
-private struct ViewerImageSurfaceView: View {
-    let url: URL
-
-    @State private var image: NSImage?
-    @State private var loadTask: Task<Void, Never>?
-
-    var body: some View {
-        ZStack {
-            Color.black
-
-            if let image {
-                Image(nsImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .transition(.opacity)
-            } else {
-                ProgressView()
-                    .progressViewStyle(.circular)
-                    .controlSize(.large)
-                    .tint(.white)
-            }
-        }
-        .clipShape(RoundedRectangle(cornerRadius: 2))
-        .task(id: url.path) {
-            await loadImage()
-        }
-        .onDisappear {
-            loadTask?.cancel()
-            loadTask = nil
-        }
-    }
-
-    private func loadImage() async {
-        loadTask?.cancel()
-        loadTask = Task {
-            let loaded = NSImage(contentsOf: url)
-            guard !Task.isCancelled else {
-                return
-            }
-
-            await MainActor.run {
-                withAnimation(.easeInOut(duration: 0.12)) {
-                    image = loaded
-                }
-            }
-        }
-
-        await loadTask?.value
     }
 }
 

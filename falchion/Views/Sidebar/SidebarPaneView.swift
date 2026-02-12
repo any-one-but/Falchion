@@ -3,187 +3,195 @@ import SwiftUI
 struct SidebarPaneView: View {
     @EnvironmentObject private var appState: FalchionAppState
 
+    private var rowVerticalPadding: CGFloat {
+        appState.preferences.compactSidebarRows ? 3 : 6
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            titlePane
-            directoriesPane
+            headerPane
+            listPane
             statusBar
         }
         .background(Color.falchionPane)
+        .onChange(of: appState.folderSearchText) { _, _ in
+            appState.reconcileSelectionAfterVisibilityChanges()
+        }
+        .onChange(of: appState.sidebarSort) { _, _ in
+            appState.reconcileSelectionAfterVisibilityChanges()
+        }
     }
 
-    private var titlePane: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            VStack(alignment: .leading, spacing: 10) {
-                Text(appState.titleText)
-                    .font(.system(size: 17, weight: .bold))
-                    .foregroundStyle(Color.falchionTextPrimary)
-                    .lineLimit(1)
-
-                HStack(spacing: 8) {
-                    Button("Refresh") {
-                        appState.refreshLibrary()
-                    }
-                    .buttonStyle(FalchionMiniButtonStyle())
-
-                    Button("⚙") {
-                        appState.showMenuOverlay.toggle()
-                    }
-                    .buttonStyle(FalchionMiniButtonStyle())
-
-                    Button("Choose Root") {
-                        appState.chooseRootFolder()
-                    }
-                    .buttonStyle(FalchionMiniButtonStyle())
-                }
-            }
-
-            HStack(spacing: 6) {
-                TextField("Search folder", text: $appState.folderSearchText)
-                    .textFieldStyle(FalchionInputStyle())
-
-                Button("X") {
-                    appState.folderSearchText = ""
+    private var headerPane: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Button {
+                    appState.showMenuOverlay = true
+                } label: {
+                    Label("Settings", systemImage: "gearshape")
+                        .labelStyle(.iconOnly)
                 }
                 .buttonStyle(FalchionMiniButtonStyle())
+
+                Button {
+                    appState.refreshLibrary()
+                } label: {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                        .labelStyle(.iconOnly)
+                }
+                .buttonStyle(FalchionMiniButtonStyle())
+
+                Button {
+                    appState.chooseRootFolder()
+                } label: {
+                    Label("Choose Root", systemImage: "folder.badge.plus")
+                }
+                .buttonStyle(FalchionMiniButtonStyle())
+
+                Spacer(minLength: 0)
             }
 
-            HStack(spacing: 6) {
-                TextField("Enter URL", text: $appState.profileURLText)
-                    .textFieldStyle(FalchionInputStyle())
+            TextField("Search folders or media", text: $appState.folderSearchText)
+                .textFieldStyle(FalchionInputStyle())
 
-                Button("Add Profile") {
-                    Task {
-                        await appState.addOnlineProfile(mode: .profile)
-                    }
-                }
-                    .buttonStyle(FalchionMiniButtonStyle())
+            Text(appState.currentDirectory?.displayPath ?? "No root selected")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Color.falchionTextSecondary)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+    }
 
-                Button("Add Posts") {
-                    Task {
-                        await appState.addOnlineProfile(mode: .posts)
-                    }
-                }
-                    .buttonStyle(FalchionMiniButtonStyle())
-
-                Text(appState.onlineProfileStatusText)
+    @ViewBuilder
+    private var listPane: some View {
+        if appState.currentDirectory == nil {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("No root selected")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Color.falchionTextPrimary)
+                Text("Choose Root to load folders and media.")
                     .font(.system(size: 11))
                     .foregroundStyle(Color.falchionTextSecondary)
-                    .lineLimit(1)
+                Spacer(minLength: 0)
             }
-        }
-        .padding(.horizontal, 10)
-        .padding(.top, 10)
-        .padding(.bottom, 8)
-    }
-
-    private var directoriesPane: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                Text("Directories")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Color.falchionTextSecondary)
-
-                Spacer()
-
-                Menu {
-                    Picker("Sort", selection: $appState.previewDirectorySort) {
-                        ForEach(PreviewDirectorySortOption.allCases) { option in
-                            Text(option.title).tag(option)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .padding(12)
+        } else {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 2) {
+                        ForEach(appState.sidebarEntries) { entry in
+                            sidebarEntryRow(entry)
+                                .id(entry.id)
                         }
                     }
-                } label: {
-                    Label("Sort", systemImage: "arrow.up.arrow.down")
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
                 }
-                .menuStyle(.borderlessButton)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(Color.falchionTextSecondary)
-            }
-            .padding(.horizontal, 10)
-            .padding(.bottom, 2)
-
-            HStack {
-                Text(appState.directoryPaneSummary)
-                    .font(.system(size: 10))
-                    .foregroundStyle(Color.falchionTextSecondary)
-                    .lineLimit(1)
-                Spacer()
-            }
-            .padding(.horizontal, 10)
-            .padding(.bottom, 6)
-
-            ScrollView {
-                LazyVStack(spacing: 6) {
-                    ForEach(appState.filteredDirectories) { directory in
-                        directoryRow(directory)
+                .background(Color.clear)
+                .onAppear {
+                    guard let selectedID = appState.selectedSidebarEntryID else {
+                        return
+                    }
+                    DispatchQueue.main.async {
+                        proxy.scrollTo(selectedID, anchor: .center)
                     }
                 }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 8)
+                .onChange(of: appState.selectedSidebarEntryID) { _, selectedID in
+                    guard let selectedID else {
+                        return
+                    }
+                    proxy.scrollTo(selectedID, anchor: .center)
+                }
             }
         }
     }
 
-    private func directoryRow(_ directory: LibraryDirectory) -> some View {
-        let isSelected = directory.id == appState.selectedDirectoryID
-
-        return Button {
-            appState.selectDirectory(directory.id)
+    private func sidebarEntryRow(_ entry: SidebarListEntry) -> some View {
+        Button {
+            appState.selectSidebarEntry(entry)
         } label: {
             HStack(spacing: 8) {
-                Image(systemName: directory.relativePath.isEmpty ? "externaldrive.fill" : "folder.fill")
+                Image(systemName: entry.kind == .directory ? "folder" : (entry.media?.kind == .video ? "film" : "photo"))
                     .font(.system(size: 12, weight: .semibold))
-                    .frame(width: 18)
                     .foregroundStyle(Color.falchionTextSecondary)
+                    .frame(width: 16)
 
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(directory.displayPath)
-                        .font(.system(size: 12, weight: .semibold))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(entryTitle(entry))
+                        .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(Color.falchionTextPrimary)
                         .lineLimit(1)
-                    Text("\(directory.directFileCount) direct • \(directory.recursiveFileCount) total")
-                        .font(.system(size: 11))
+
+                    Text(entrySubtitle(entry))
+                        .font(.system(size: 10))
                         .foregroundStyle(Color.falchionTextSecondary)
                         .lineLimit(1)
                 }
 
                 Spacer(minLength: 0)
-
-                Text(appState.directoryMetadataText(directory))
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(Color.falchionTextSecondary)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(Color.falchionCardSurface)
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 3)
-                            .stroke(Color.falchionBorder, lineWidth: 1)
-                    }
-                    .cornerRadius(3)
             }
             .padding(.horizontal, 8)
-            .padding(.vertical, 6)
+            .padding(.vertical, rowVerticalPadding)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(isSelected ? Color.falchionRowSelected : Color.falchionRow)
-            .overlay {
-                RoundedRectangle(cornerRadius: 3)
-                    .stroke(isSelected ? Color.falchionBorderStrong : Color.clear, lineWidth: 1)
-            }
-            .cornerRadius(3)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(appState.isSidebarEntrySelected(entry) ? Color.accentColor.opacity(0.22) : Color.clear)
+            )
         }
         .buttonStyle(.plain)
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) {
+            if let directoryID = entry.directory?.id {
+                appState.enterDirectory(directoryID)
+            }
+        }
+    }
+
+    private func entryTitle(_ entry: SidebarListEntry) -> String {
+        if let directory = entry.directory {
+            return directory.name
+        }
+
+        if let media = entry.media {
+            if appState.preferences.showFileExtensions {
+                return media.name
+            }
+            return URL(fileURLWithPath: media.name).deletingPathExtension().lastPathComponent
+        }
+
+        return "Unknown"
+    }
+
+    private func entrySubtitle(_ entry: SidebarListEntry) -> String {
+        if let directory = entry.directory {
+            if !appState.preferences.showMetadataBadges {
+                return "\(directory.directFileCount) direct • \(directory.recursiveFileCount) total"
+            }
+            return "\(directory.directFileCount) direct • \(directory.recursiveFileCount) total • \(appState.directoryMetadataText(directory))"
+        }
+
+        if let media = entry.media {
+            if appState.preferences.showPathsInSidebar {
+                return appState.mediaListMetadataText(media)
+            }
+            return media.kind == .video ? "Video" : "Image"
+        }
+
+        return ""
     }
 
     private var statusBar: some View {
         HStack(spacing: 8) {
-            Text(appState.statusMessage)
+            Text(appState.directoryPaneSummary)
                 .font(.system(size: 11))
                 .foregroundStyle(Color.falchionTextSecondary)
                 .lineLimit(1)
 
             Spacer()
 
-            Text(appState.selectedDirectory?.displayPath ?? "No folder selected")
+            Text(appState.statusMessage)
                 .font(.system(size: 10))
                 .foregroundStyle(Color.falchionTextSecondary)
                 .lineLimit(1)

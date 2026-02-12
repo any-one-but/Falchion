@@ -1,5 +1,6 @@
 import AVFoundation
 import AVKit
+import AppKit
 import SwiftUI
 
 enum VideoPlaybackLayout {
@@ -230,5 +231,39 @@ struct VideoPlaybackView: View {
         }
 
         return String(format: "%02d:%02d", minutes, secs)
+    }
+}
+
+struct PlainVideoSurfaceView: NSViewRepresentable {
+    let url: URL
+
+    func makeNSView(context: Context) -> AVPlayerView {
+        let view = AVPlayerView()
+        view.controlsStyle = .none
+        view.videoGravity = .resizeAspect
+        view.showsFullScreenToggleButton = false
+        view.player = AVPlayer(url: url)
+        view.player?.play()
+        return view
+    }
+
+    func updateNSView(_ nsView: AVPlayerView, context: Context) {
+        guard let player = nsView.player else {
+            nsView.player = AVPlayer(url: url)
+            nsView.player?.play()
+            return
+        }
+
+        let currentURL = (player.currentItem?.asset as? AVURLAsset)?.url.standardizedFileURL
+        if currentURL != url.standardizedFileURL {
+            player.pause()
+            nsView.player = AVPlayer(url: url)
+            nsView.player?.play()
+        }
+    }
+
+    static func dismantleNSView(_ nsView: AVPlayerView, coordinator: ()) {
+        nsView.player?.pause()
+        nsView.player = nil
     }
 }
